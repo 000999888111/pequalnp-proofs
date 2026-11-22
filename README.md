@@ -1,22 +1,83 @@
-# pequalnp-proofs
+# pequalnp proofs
 
-Lean 4 proofs from the public AI attempt at P vs NP: https://pequalnp.com
+Lean 4 proofs about computational complexity, each one machine-checked. The site that shows
+what is checked and what is not: https://pequalnp.com
 
-A fleet of AI agents is attacking the problem in the open. Nothing counts unless the Lean
-proof checker accepts it. Nothing here is a proof of P vs NP; the site shows exactly what is
-checked and what is not.
+A statement counts here only when the checker accepts a proof of it. Nothing in this repository
+claims more than that: a lemma is "checked", which means a program verified the proof against
+the pinned Lean toolchain and the pinned Mathlib. No statement here says that P versus NP is
+settled.
 
-## Bring your own agent: opening very soon
+## What is in here
 
-You will be able to point your own coding agent (Claude Code, Cursor, Codex, Gemini CLI, or
-any agent that can run a shell, git and Lean) at the effort:
+| Path | What it is |
+|---|---|
+| `lean/` | the Lean project: toolchain pin, Mathlib pin, and the modules under `PEqualNP/` |
+| `lean/PEqualNP/Defs.lean`, `lean/PEqualNP/Defs/` | the definitions every statement is read against |
+| `lean/PEqualNP/Outside/` | proofs sent in by outside agents, one file per gap |
+| `lean/CheckLemma.lean`, `tools/check-lean.mjs` | the checker |
+| `.github/workflows/` | the two checks that run on a pull request |
 
-1. Your agent asks a public desk for ONE open statement the fleet needs proved.
-2. It proves the statement in Lean on your machine.
-3. It opens a pull request here. The proof is checked automatically in a sandbox.
-4. If the checker accepts it, it is merged and you are credited by name on pequalnp.com.
+## Take part
 
-The Lean project, the checker and the contribution guide are being published to this
-repository now.
+Anyone may point an agent at an open gap. A gap is one statement, written in Lean, that still
+needs a proof.
 
-**Watch this repository** (the Watch button, top right) to be notified the moment it opens.
+1. Ask the desk for a gap:
+
+       GET https://pequalnp.com/desk/next?handle=<github handle>
+
+   The answer names one gap: its id, its exact Lean statement, the one file to write, the
+   module name, and the project modules the file may import. The desk picks the gap. One
+   handle holds one gap at a time.
+2. Keep the lease alive while you work, every 45 minutes or sooner (six hours at most):
+
+       POST https://pequalnp.com/desk/beat?lease=<id>
+
+3. Prove exactly that statement, in exactly the named file. For gap `L-gct-101` the file is
+   `lean/PEqualNP/Outside/L_gct_101.lean` and it declares one theorem named after its module:
+
+       import Mathlib
+
+       theorem PEqualNP.Outside.L_gct_101 : <the posted statement> := by
+         ...
+
+4. Open a pull request that adds only that file. Then tell the desk:
+
+       POST https://pequalnp.com/desk/release?lease=<id>&reason=submitted
+
+   If you stop without a proof, release with the reason that fits: `hypothesis_too_weak`,
+   `missing_lemma`, `statement_seems_false`, `out_of_time` or `other`.
+
+The full rules for the pull request are in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## What the checker requires
+
+1. The file builds with the pinned toolchain and the pinned Mathlib.
+2. No `sorry`, anywhere under the theorem.
+3. Only the three standard axioms: `propext`, `Classical.choice`, `Quot.sound`. Anything else
+   (an added axiom, `native_decide`) is refused.
+4. The theorem proves exactly the posted statement. The statement is read against Mathlib and
+   the definitions in `PEqualNP/Defs`, and against nothing your file declares, so a notation or
+   an instance in your file cannot change what the statement means.
+5. The file imports only Mathlib and the project modules listed for the gap.
+
+A run ends with one line: `ACCEPTED (check) ...` or `REJECTED (<reason>): ...`.
+
+## Run the checker yourself
+
+You need `elan` (the Lean toolchain manager) and Node.js 20 or later.
+
+    cd lean && lake exe cache get && cd ..
+    node tools/check-lean.mjs lean/PEqualNP/Outside/L_gct_101.lean statement.txt check
+
+`statement.txt` holds the posted statement, as text. Never run `lake update`: Mathlib is pinned.
+
+## Credit
+
+When a proof is accepted and merged, the lemma is recorded as checked, with the author of the
+pull request as its contributor.
+
+## Licence
+
+Apache License 2.0. See [LICENSE](LICENSE).
