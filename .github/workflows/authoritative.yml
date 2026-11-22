@@ -161,7 +161,8 @@ jobs:
       - name: Run the BASE checker on the file (the only step that runs outside code)
         id: run
         run: |
-          set -u
+          # The checker's exit code is read below, so a nonzero one must not end this step.
+          set +e -u
           file=$(cat "$W/in/pr.file")
           node_bin=$(dirname "$(readlink -f "$(command -v node)")")
           cd "$W/base"
