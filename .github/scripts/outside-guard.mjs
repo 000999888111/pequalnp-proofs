@@ -4,6 +4,7 @@
 // passed a strict pattern, so the shell never sees free text from a pull request.
 //
 //   node outside-guard.mjs pr <pr.json> <files.json> <tree.json> <repo> <default branch> <out dir>
+//   node outside-guard.mjs main <compare.json> <tree.json> <file path> <commit> <out dir>
 //   node outside-guard.mjs gap <gaps.json> <gap id> <file path> <out dir>
 //   node outside-guard.mjs gap-of-file <gaps.json> <file path> <out dir>
 //   node outside-guard.mjs imports <lean file> <imports.json>
@@ -52,6 +53,24 @@ export function checkPr(pr, files, tree, repo, defaultBranch) {
   if (e.sha !== f.sha) refuse('the file list and the tree disagree about the content');
   if (!Number.isInteger(e.size) || e.size < 1 || e.size > MAX_BYTES) refuse(`the file must be between 1 and ${MAX_BYTES} bytes`);
   return { file: f.filename, module: moduleOf(f.filename), head, blob: f.sha, author, size: e.size };
+}
+
+// A proof file ALREADY ON THE BASE BRANCH, judged again (a run without a pull request). Read from
+// the API's own answers: the comparison of the named commit with the commit this run checked
+// out (the named one must be on the base branch: the same commit or an ancestor), and the tree
+// of the named commit. The same file rules as for a pull request.
+export function checkMain(compare, tree, file, commit) {
+  if (!SHA_RE.test(commit ?? '')) refuse('the commit must be a 40 character hash');
+  if (typeof file !== 'string' || !FILE_RE.test(file)) refuse('the file must be lean/PEqualNP/Outside/L_<gap>.lean');
+  if (!['ahead', 'identical'].includes(compare?.status) || compare?.merge_base_commit?.sha !== commit) refuse('the commit is not on the base branch (not the checked-out commit or an ancestor of it)');
+  if (tree?.truncated) refuse('the tree of the commit is too large to read whole');
+  const entries = (tree?.tree ?? []).filter((e) => e.path === file);
+  if (entries.length !== 1) refuse('the file is not in the tree of the commit');
+  const e = entries[0];
+  if (e.type !== 'blob' || e.mode !== '100644') refuse('the file must be a plain file (not a link, not executable)');
+  if (!SHA_RE.test(e.sha ?? '')) refuse('the tree names no content hash');
+  if (!Number.isInteger(e.size) || e.size < 1 || e.size > MAX_BYTES) refuse(`the file must be between 1 and ${MAX_BYTES} bytes`);
+  return { file, module: moduleOf(file), head: commit, blob: e.sha, author: 'main', size: e.size };
 }
 
 // The gap as the desk posts it. Its file must be the file of the pull request.
@@ -241,6 +260,9 @@ const main = () => {
   if (cmd === 'pr' && a.length === 6) {
     const r = checkPr(json(a[0]), json(a[1]), json(a[2]), a[3], a[4]);
     for (const [k, v] of Object.entries(r)) put(a[5], `pr.${k}`, `${v}\n`);
+  } else if (cmd === 'main' && a.length === 5) {
+    const r = checkMain(json(a[0]), json(a[1]), a[2], a[3]);
+    for (const [k, v] of Object.entries(r)) put(a[4], `pr.${k}`, `${v}\n`);
   } else if ((cmd === 'gap' && a.length === 4) || (cmd === 'gap-of-file' && a.length === 3)) {
     const byId = cmd === 'gap';
     const [gapsPath, file, out] = byId ? [a[0], a[2], a[3]] : a;
@@ -271,7 +293,7 @@ const main = () => {
     put(out, 'outside-sources.txt', r.outside.map((m) => `base/lean/${m.split('.').join('/')}.lean\n`).join(''));
     process.stdout.write(`built before the locked step: ${r.base.join(' ') || '(none)'}\noutside-written, built only in the locked step: ${r.outside.join(' ') || '(none)'}\n`);
   } else {
-    process.stderr.write('usage: outside-guard.mjs pr|gap|gap-of-file|imports|closure ... (see the header)\n');
+    process.stderr.write('usage: outside-guard.mjs pr|main|gap|gap-of-file|imports|closure ... (see the header)\n');
     process.exit(3);
   }
 };

@@ -124,3 +124,26 @@ test(`closure refused: ${MAX_OUTSIDE + 1} outside modules, one listed and the re
   files['PEqualNP.Outside.L_x_1000'] = proof(Object.keys(many(MAX_OUTSIDE)), 'PEqualNP.Outside.L_x_1000');
   assert.throws(() => closure(['PEqualNP.Outside.L_x_1000'], files), /more than 16 outside modules/);
 });
+// A file already on the base branch, judged again without a pull request.
+import { checkMain } from './outside-guard.mjs';
+const C = 'a'.repeat(40), B = 'b'.repeat(40), MF = 'lean/PEqualNP/Outside/L_meta_157.lean';
+const cmp = (over = {}) => ({ status: 'ahead', merge_base_commit: { sha: C }, ...over });
+const tr = (over = {}) => ({ truncated: false, tree: [{ path: MF, type: 'blob', mode: '100644', sha: B, size: 900, ...over }] });
+test('main: a plain file at a commit of the base branch', () => {
+  assert.deepEqual(checkMain(cmp(), tr(), MF, C), { file: MF, module: 'PEqualNP.Outside.L_meta_157', head: C, blob: B, author: 'main', size: 900 });
+  assert.equal(checkMain(cmp({ status: 'identical' }), tr(), MF, C).blob, B);
+});
+const mainRefused = (name, args, word) => test(`main refused: ${name}`, () => {
+  assert.throws(() => checkMain(...args), (e) => e.message.includes(word), 'not refused, or for another reason');
+});
+mainRefused('a commit off the base branch', [cmp({ status: 'diverged' }), tr(), MF, C], 'not on the base branch');
+mainRefused('a commit ahead of the checked-out one', [cmp({ status: 'behind' }), tr(), MF, C], 'not on the base branch');
+mainRefused('a comparison about another commit', [cmp({ merge_base_commit: { sha: B } }), tr(), MF, C], 'not on the base branch');
+mainRefused('a short commit', [cmp(), tr(), MF, 'abc'], '40 character');
+mainRefused('a file outside Outside', [cmp(), tr(), 'lean/PEqualNP/Defs.lean', C], 'lean/PEqualNP/Outside/L_<gap>.lean');
+mainRefused('a path that climbs out', [cmp(), tr(), 'lean/PEqualNP/Outside/../Defs.lean', C], 'lean/PEqualNP/Outside/L_<gap>.lean');
+mainRefused('a file not in the tree', [cmp(), { tree: [] }, MF, C], 'not in the tree');
+mainRefused('a link', [cmp(), tr({ mode: '120000' }), MF, C], 'plain file');
+mainRefused('an executable', [cmp(), tr({ mode: '100755' }), MF, C], 'plain file');
+mainRefused('a file too large', [cmp(), tr({ size: 600000 }), MF, C], 'between 1 and');
+mainRefused('a truncated tree', [cmp(), { ...tr(), truncated: true }, MF, C], 'too large');

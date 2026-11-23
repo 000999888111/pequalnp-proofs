@@ -1,5 +1,9 @@
 # AUTHORITATIVE check of one pull request. Started by hand (workflow_dispatch) from the base
 # repository, with the pull request number and the gap id. Its verdict is the one that counts.
+# Or, in place of a pull request, a proof file ALREADY MERGED on the base branch: its path and
+# a commit of the base branch that holds it. The bytes are read at that commit by their hash,
+# the statement still comes from the desk's list, and the file is taken out of the base tree
+# before anything is built, so it is compiled only in the locked step, like a pull request's.
 #
 # The rule behind every guard below: the only thing taken from the pull request is the bytes of
 # one Lean file. The fork is never checked out. Nothing from it runs, except that Lean compiles
@@ -18,8 +22,16 @@ on:
   workflow_dispatch:
     inputs:
       pr:
-        description: Pull request number
-        required: true
+        description: Pull request number (leave empty to judge a file already on the base branch)
+        required: false
+        type: string
+      file:
+        description: Only without a pull request. A file on the base branch, lean/PEqualNP/Outside/L_<gap>.lean
+        required: false
+        type: string
+      commit:
+        description: Only without a pull request. A commit of the base branch that holds the file (40 hex)
+        required: false
         type: string
       gap:
         description: Gap id, for example L-gct-101
@@ -32,7 +44,7 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: authoritative-${{ inputs.pr }}
+  group: authoritative-${{ inputs.pr || inputs.file }}
   cancel-in-progress: false
 
 jobs:
@@ -44,6 +56,8 @@ jobs:
       # environment variables, and the next step refuses anything but digits and a plain id.
       # They are never pasted into a script with the workflow's own expression syntax.
       PR: ${{ inputs.pr }}
+      MAIN_FILE: ${{ inputs.file }}
+      MAIN_COMMIT: ${{ inputs.commit }}
       GAP: ${{ inputs.gap }}
       DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
       GAPS_URL: https://data.pequalnp.com/data/desk/gaps.json
@@ -58,7 +72,14 @@ jobs:
           # write to it: this one and the three guard steps below.
           ( umask 077; : > "$RUNNER_TEMP/steps.log" ); chmod 600 "$RUNNER_TEMP/steps.log"
           exec > >(tee -a "$RUNNER_TEMP/steps.log") 2>&1
-          printf '%s' "$PR" | grep -Eqx '[1-9][0-9]{0,6}' || { echo "REFUSED: pr must be a number"; exit 1; }
+          # Exactly one source: a pull request, or a file and a commit of the base branch.
+          if [ -n "$PR" ]; then
+            printf '%s' "$PR" | grep -Eqx '[1-9][0-9]{0,6}' || { echo "REFUSED: pr must be a number"; exit 1; }
+            [ -z "$MAIN_FILE" ] && [ -z "$MAIN_COMMIT" ] || { echo "REFUSED: give a pull request, or a file and a commit, not both"; exit 1; }
+          else
+            printf '%s' "$MAIN_FILE" | grep -Eqx 'lean/PEqualNP/Outside/L_[a-z0-9_]+\.lean' || { echo "REFUSED: without a pull request, file must be lean/PEqualNP/Outside/L_<gap>.lean"; exit 1; }
+            printf '%s' "$MAIN_COMMIT" | grep -Eqx '[0-9a-f]{40}' || { echo "REFUSED: without a pull request, commit must be a 40 character hash"; exit 1; }
+          fi
           printf '%s' "$GAP" | grep -Eqx 'L-[a-z0-9]+(-[a-z0-9]+)*' || { echo "REFUSED: gap must look like L-gct-101"; exit 1; }
           [ "${#GAP}" -le 64 ] || { echo "REFUSED: gap id too long"; exit 1; }
           # Only the default branch holds the checker and this file as they were reviewed.
@@ -76,7 +97,7 @@ jobs:
           [ "$(git -C "$W/base" rev-parse HEAD)" = "$GITHUB_SHA" ]
           echo "base commit: $GITHUB_SHA"
 
-      - name: Read the pull request through the API and refuse anything but one added proof file
+      - name: Read the pull request (or the file on the base branch) through the API and refuse anything but one proof file
         env:
           # The credential of this run, read only, given to this step and the next one alone.
           GH_TOKEN: ${{ github.token }}
@@ -86,6 +107,21 @@ jobs:
           get() { curl -sSf --proto '=https' --max-redirs 0 --max-filesize 20000000 \
                     -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
                     -H "X-GitHub-Api-Version: 2022-11-28" -o "$2" "$API/repos/$GITHUB_REPOSITORY/$1"; }
+          if [ -z "$PR" ]; then
+            # A file already on the base branch. The named commit must be the checked-out one or
+            # an ancestor of it; the file is read from that commit's tree, as for a pull request.
+            get "compare/$MAIN_COMMIT...$GITHUB_SHA" "$W/api/compare.json"
+            get "git/trees/$MAIN_COMMIT?recursive=1" "$W/api/tree.json"
+            node "$W/base/.github/scripts/outside-guard.mjs" main "$W/api/compare.json" "$W/api/tree.json" \
+              "$MAIN_FILE" "$MAIN_COMMIT" "$W/in"
+            # Taken out of the base tree now, before anything is built: it is outside-written, so
+            # it is compiled only in the locked step, from the bytes read at the named commit.
+            f="$W/base/$(cat "$W/in/pr.file")"
+            if [ -e "$f" ] || [ -L "$f" ]; then rm -f -- "$f"; fi
+            [ ! -e "$f" ] || { echo "REFUSED: the file could not be taken out of the base tree"; exit 1; }
+            echo "source: main at $MAIN_COMMIT, file $MAIN_FILE (no pull request)"
+            exit 0
+          fi
           get "pulls/$PR" "$W/api/pr.json"
           get "pulls/$PR/files?per_page=100" "$W/api/files.json"
           # The head commit, as a 40 character hash, before it is used in a URL.
@@ -372,9 +408,17 @@ jobs:
           # printed unquoted and before the quoted block, so no quoted line can pass for it.
           fsha=$(awk -v p="base/$file" '$2 == p { print $1 }' "$RUNNER_TEMP/before.sha256")
           ssha=$(awk '$2 == "in/statement.txt" { print $1 }' "$RUNNER_TEMP/before.sha256")
+          # A run on a file already on the base branch has no pull request: its line says so,
+          # with pr null, source "main" and the commit the bytes were read at. A pull request's
+          # line is unchanged.
           if printf '%s %s' "$fsha" "$ssha" | grep -Eqx '[0-9a-f]{64} [0-9a-f]{64}'; then
-            echo "OUTSIDE $(jq -cn --arg lemma "$GAP" --argjson pr "$PR" --arg file "$file" --arg f "$fsha" --arg s "$ssha" \
-              '{lemma: $lemma, pr: $pr, file: $file, file_sha256: $f, statement_sha256: $s}')"
+            if [ -n "$PR" ]; then
+              echo "OUTSIDE $(jq -cn --arg lemma "$GAP" --argjson pr "$PR" --arg file "$file" --arg f "$fsha" --arg s "$ssha" \
+                '{lemma: $lemma, pr: $pr, file: $file, file_sha256: $f, statement_sha256: $s}')"
+            else
+              echo "OUTSIDE $(jq -cn --arg lemma "$GAP" --arg c "$(cat "$W/in/pr.head")" --arg file "$file" --arg f "$fsha" --arg s "$ssha" \
+                '{lemma: $lemma, pr: null, source: "main", commit: $c, file: $file, file_sha256: $f, statement_sha256: $s}')"
+            fi
           fi
           # The output can quote the proof file. It is printed with workflow commands switched
           # off, so a line in it cannot pass for an instruction to the runner.
@@ -402,10 +446,15 @@ jobs:
           printf '%s\n' "$last" | quoted
           echo "::$stop::"
           echo "----- what was checked -----"
-          echo "pull request: $PR   gap: $GAP   author (credit): $(cat "$W/in/pr.author")"
-          echo "head commit: $(cat "$W/in/pr.head")   file: $file   content hash: $(cat "$W/in/pr.blob")"
+          if [ -n "$PR" ]; then
+            echo "pull request: $PR   gap: $GAP   author (credit): $(cat "$W/in/pr.author")"
+            echo "head commit: $(cat "$W/in/pr.head")   file: $file   content hash: $(cat "$W/in/pr.blob")"
+          else
+            echo "source: main (no pull request)   gap: $GAP   author (credit): the author of the commit that added the file"
+            echo "read at commit: $(cat "$W/in/pr.head")   file: $file   content hash: $(cat "$W/in/pr.blob")"
+          fi
           echo "base commit: $GITHUB_SHA   statement sha256: $(sha256sum "$W/in/statement.txt" | cut -d' ' -f1)"
-          echo "Merge only while the pull request's head is still the head commit above."
+          [ -z "$PR" ] || echo "Merge only while the pull request's head is still the head commit above."
           if [ -s "$W/in/outside-imports.txt" ]; then
             # Printed by this step from paths the guard wrote; no text of a pull request.
             echo "----- listed outside modules -----"
@@ -422,13 +471,14 @@ jobs:
               echo "  $m ${h:-(could not be read)}"
             done < "$W/in/outside-imports.txt"
           fi
+          src=""; [ -n "$PR" ] || src="; source main at $(cat "$W/in/pr.head"), not a pull request"
           # ACCEPTED needs all of: exit 0, an ACCEPTED last line, one MANIFEST line, untouched files.
           verdict=FAULT
           case "$CODE" in
             0) case "$last" in "ACCEPTED (check)"*) [ "$manifests" = 1 ] && [ "$same" = yes ] && verdict=ACCEPTED ;; esac ;;
             1) case "$last" in REJECTED*) verdict=REJECTED ;; esac ;;
           esac
-          echo "VERDICT: $verdict (checker exit $CODE)" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "VERDICT: $verdict (checker exit $CODE$src)" | tee -a "$GITHUB_STEP_SUMMARY"
           [ "$verdict" = ACCEPTED ] && exit 0
           [ "$verdict" = REJECTED ] && exit 1
           exit 3
