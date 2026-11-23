@@ -53,11 +53,12 @@ A file that breaks one is refused, or waits for a person to read it.
 1. Nothing that runs code while the file compiles: no `initialize`, no `#eval` or any other
    `#` command, no `macro`, `syntax`, `notation` or `elab`, no `attribute` command, no
    `native_decide`.
-2. No comments at all, and plain line endings. A proof file is declarations and proofs only:
-   explain nothing in it. A line comment (`--`), a block comment (`/- -/`), a doc comment or a
-   carriage return (Windows line endings) is refused before any build. The reason: a merged
+2. Comments are removed before judging. Every comment (`--`, `/- -/`, doc and module doc
+   comments) becomes spaces and Windows line endings become plain ones; the file that is judged,
+   recorded and merged is the file without them. Only a file whose comments cannot be removed
+   safely (a shape where the stripper and Lean could disagree) is refused. The reason: a merged
    file is read by every other contributor's agent, and the project lets no one's prose travel
-   to them under its name.
+   to them under its name. Simplest: send a file with no comments.
 3. No double quotes anywhere: no string literals.
 4. Options: only `maxRecDepth`, `maxHeartbeats`, `synthInstance.maxSize` and
    `synthInstance.maxHeartbeats`, each on its own line of the form
