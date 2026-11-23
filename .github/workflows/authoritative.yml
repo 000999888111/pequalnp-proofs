@@ -48,6 +48,11 @@ jobs:
       - name: Refuse malformed inputs and a run from another branch
         run: |
           set -eu
+          # steps.log keeps what the guard steps print, for the verdict step. Only this account
+          # can read or write it (0600), and only the steps that run BEFORE any outside code
+          # write to it: this one and the three guard steps below.
+          ( umask 077; : > "$RUNNER_TEMP/steps.log" ); chmod 600 "$RUNNER_TEMP/steps.log"
+          exec > >(tee -a "$RUNNER_TEMP/steps.log") 2>&1
           printf '%s' "$PR" | grep -Eqx '[1-9][0-9]{0,6}' || { echo "REFUSED: pr must be a number"; exit 1; }
           printf '%s' "$GAP" | grep -Eqx 'L-[a-z0-9]+(-[a-z0-9]+)*' || { echo "REFUSED: gap must look like L-gct-101"; exit 1; }
           [ "${#GAP}" -le 64 ] || { echo "REFUSED: gap id too long"; exit 1; }
@@ -72,6 +77,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
+          exec > >(tee -a "$RUNNER_TEMP/steps.log") 2>&1   # kept for the verdict step
           get() { curl -sSf --proto '=https' --max-redirs 0 --max-filesize 20000000 \
                     -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
                     -H "X-GitHub-Api-Version: 2022-11-28" -o "$2" "$API/repos/$GITHUB_REPOSITORY/$1"; }
@@ -93,6 +99,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
+          exec > >(tee -a "$RUNNER_TEMP/steps.log") 2>&1   # kept for the verdict step
           blob=$(cat "$W/in/pr.blob")
           # The content is fetched by its hash, as bytes, into a plain file this run creates.
           # Whatever the pull request made of the path (a link, a mode), only bytes arrive.
@@ -106,6 +113,7 @@ jobs:
       - name: The posted statement for the gap, and the import rule
         run: |
           set -eu
+          exec > >(tee -a "$RUNNER_TEMP/steps.log") 2>&1   # kept for the verdict step
           # The statement comes from the desk's public list, never from the pull request.
           curl -sSf --proto '=https' --max-redirs 0 --max-filesize 5000000 -o "$W/in/gaps.json" "$GAPS_URL"
           node "$W/base/.github/scripts/outside-guard.mjs" gap "$W/in/gaps.json" "$GAP" "$(cat "$W/in/pr.file")" "$W/in"
@@ -132,9 +140,34 @@ jobs:
           "$TC_BIN/lake" exe cache get
           # Base code only: the verifier, the definitions, and the modules the gap lets the file
           # import. The proof file is not in the tree yet, so nothing of it is compiled here.
-          set -- checklemma +PEqualNP.Defs
+          # The whole of Mathlib is named too: the cache does not carry every hash file Lake
+          # keeps beside a module, and Lake writes a missing one the first time it replays that
+          # module. That must happen here, as this account, because the locked account cannot
+          # write under the library (it failed there on two modules: permission denied).
+          set -- checklemma +Mathlib +PEqualNP.Defs
           while IFS= read -r m; do if [ -n "$m" ]; then set -- "$@" "+$m"; fi; done < "$W/in/imports.txt"
           ../tools/bin/lake build "$@"
+
+      - name: Swap space for the verifier
+        run: |
+          set -eu
+          # The verifier loads the library more than once in one process, and only the first
+          # load is shared with the files on disk: for a proof that imports all of Mathlib it
+          # needs more memory than a standard runner has. Without swap it starves the runner
+          # (the run hangs and its log is lost). The swap file belongs to root, mode 0600.
+          # The disk has no room for it until toolsets this run never uses are removed.
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
+          # As large as the emptier disk allows while 6 GB of it stay free, at most 12 GB.
+          df -m / /mnt 2>/dev/null || true
+          d=$(df -m --output=avail,target / /mnt 2>/dev/null | awk 'NR>1' | sort -rn | awk 'NR==1{print $2}')
+          mb=$(( $(df -m --output=avail "$d" | awk 'NR==2{print $1}') - 6144 ))
+          [ "$mb" -le 12288 ] || mb=12288
+          if [ "$mb" -ge 1024 ]; then
+            f="${d%/}/pnp-swap"
+            sudo fallocate -l "${mb}M" "$f" && sudo chmod 600 "$f"
+            sudo mkswap -q "$f" && sudo swapon "$f"
+          fi
+          free -m
 
       - name: Put the file in place and lock the tree
         run: |
@@ -166,15 +199,25 @@ jobs:
           file=$(cat "$W/in/pr.file")
           node_bin=$(dirname "$(readlink -f "$(command -v node)")")
           cd "$W/base"
+          # Full build output, kept by lake-locked.sh. Created and owned by this account, closed
+          # to every other one: the locked account can neither list, read nor create files in it.
+          mkdir -m 700 "$RUNNER_TEMP/builds"
           # The same command the project's own records are made with:
           #   node tools/check-lean.mjs <lean file> <statement file> check
           # The environment is emptied, so no credential of this run is in it. The checker and
           # the verifier run as this run's account. Every build goes through lake-locked.sh and
           # runs as `outsider` (see that file). The compile is another account than the checker,
           # so it cannot signal it, read or write its memory, or write to its output files.
+          # The checker and everything it starts, the locked compile included, run inside one
+          # memory limit below the machine's memory. What they need beyond it goes to swap,
+          # instead of starving the runner itself, which loses the log and leaves the run hanging.
+          cap=$(( $(awk '/^MemTotal:/{print $2}' /proc/meminfo) - 1572864 ))
+          echo "memory: $(awk '/^MemTotal:/{print $2}' /proc/meminfo) kB, limit for the checker: $cap kB"
+          sudo systemd-run --quiet --scope --collect -p MemoryMax="${cap}K" \
+              --uid="$(id -u)" --gid="$(id -g)" \
           env -i HOME="$HOME" LANG=C.UTF-8 PATH="$TC_BIN:$node_bin:/usr/bin:/bin" \
               PEQUALNP_REAL_LAKE="$W/base/.github/scripts/lake-locked.sh" PEQUALNP_HOME="$W/queue" \
-              PNP_TC_BIN="$TC_BIN" PNP_GITCONFIG="$W/in/gitconfig" \
+              PNP_TC_BIN="$TC_BIN" PNP_GITCONFIG="$W/in/gitconfig" PNP_BUILD_LOGS="$RUNNER_TEMP/builds" \
             timeout -k 30 5400 node "$W/base/tools/check-lean.mjs" "$W/base/$file" "$W/in/statement.txt" check \
             > "$RUNNER_TEMP/checker.out" 2> "$RUNNER_TEMP/checker.err"
           code=$?
@@ -183,10 +226,50 @@ jobs:
           echo "code=$code" >> "$GITHUB_OUTPUT"
 
       - name: Print the checker's last line, MANIFEST, and the verdict
+        # Always: whatever stopped the run, its last step says why in one place.
+        if: always()
         env:
           CODE: ${{ steps.run.outputs.code }}
+          RAN: ${{ steps.run.outcome }}
         run: |
           set -u
+          # Everything below that a pull request can influence (the checker's output, the build
+          # output, a guard's reason) is printed ONLY through quoted, between stop-commands and
+          # its resume token: control characters removed, every line cut and prefixed with
+          # "  | ". So no such line can be a workflow command, and none can start with
+          # VERDICT. The verdict is the job's conclusion and the VERDICT line this step writes
+          # itself, to the log and to the step summary, from $CODE and the checks below.
+          quoted() { tr -d '\000-\010\013-\037\177' | cut -c1-2000 | sed 's/^/  | /'; }
+          stop="stop-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+          if [ -z "$CODE" ] && [ "$RAN" != skipped ] && [ -n "$RAN" ]; then
+            # The checker's step started and recorded no exit code: it was stopped (its time
+            # limit, or the run was cancelled). No verdict. What it was doing is printed quoted.
+            echo "::stop-commands::$stop"
+            for b in "$RUNNER_TEMP"/builds/*/; do
+              [ -d "$b" ] || continue
+              echo "----- a build's output (tail) -----"
+              cat "$b/cmd" 2>/dev/null | quoted; tail -n 15 "$b/out" | quoted; tail -n 15 "$b/err" | quoted
+            done
+            tail -n 15 "$RUNNER_TEMP/checker.err" 2>/dev/null | quoted
+            echo "::$stop::"
+            echo "VERDICT: FAULT (the checker's step was stopped before it finished: $RAN. This says nothing about the proof.)" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 3
+          fi
+          if [ -z "$CODE" ]; then
+            # The checker's step never started, so no outside code ran. steps.log was written
+            # only by the guard steps before that step, as this account (0600). A REFUSED
+            # line in it is a guard's refusal of the pull request; without one, the run itself
+            # failed, which says nothing of the proof.
+            if grep -aq '^REFUSED' "$RUNNER_TEMP/steps.log" 2>/dev/null; then
+              echo "::stop-commands::$stop"
+              grep -a '^REFUSED' "$RUNNER_TEMP/steps.log" | tail -n 1 | quoted
+              echo "::$stop::"
+              echo "VERDICT: REFUSED (before any build; the reason is the quoted line above)" | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+            echo "VERDICT: FAULT (the run stopped before the checker started; the failed step above says where. This says nothing about the proof.)" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 3
+          fi
           file=$(cat "$W/in/pr.file")
           # The trusted files must be what they were before the hostile step.
           ( cd "$W" && sha256sum "base/$file" in/statement.txt base/tools/check-lean.mjs base/tools/build.sh \
@@ -197,15 +280,24 @@ jobs:
           manifests=$(grep -c '^MANIFEST {' "$RUNNER_TEMP/checker.out" || true)
           # The output can quote the proof file. It is printed with workflow commands switched
           # off, so a line in it cannot pass for an instruction to the runner.
-          stop="stop-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
           echo "::stop-commands::$stop"
-          echo "----- checker diagnostics (tail) -----"
-          tail -n 30 "$RUNNER_TEMP/checker.err"
-          tail -n 40 "$RUNNER_TEMP/checker.out" | grep -v '^MANIFEST {' | cut -c1-2000
+          echo "----- checker diagnostics (first lines, then tail) -----"
+          head -n 3 "$RUNNER_TEMP/checker.err" | quoted
+          tail -n 30 "$RUNNER_TEMP/checker.err" | quoted
+          # The checker passes on only the last lines of a failed build. The first errors of
+          # each build that failed are printed here from the full output lake-locked.sh kept.
+          for b in "$RUNNER_TEMP"/builds/*/; do
+            [ -f "$b/cmd" ] || continue
+            grep -q '(exit 0)$' "$b/cmd" && continue
+            echo "----- first errors of a build that failed -----"
+            cat "$b/cmd" "$b/out" "$b/err" | grep -av 'designed for use with the module system' \
+              | grep -a -m 8 -A 15 -E '^lake |^error|^✖|: error' | quoted
+          done
+          tail -n 40 "$RUNNER_TEMP/checker.out" | grep -av '^MANIFEST {' | quoted
           echo "----- MANIFEST -----"
-          grep '^MANIFEST {' "$RUNNER_TEMP/checker.out" || echo "(none)"
+          grep -a '^MANIFEST {' "$RUNNER_TEMP/checker.out" | cut -c1-200000 | sed 's/^/  | /' || true
           echo "----- last line -----"
-          printf '%s\n' "$last"
+          printf '%s\n' "$last" | quoted
           echo "::$stop::"
           echo "----- what was checked -----"
           echo "pull request: $PR   gap: $GAP   author (credit): $(cat "$W/in/pr.author")"
@@ -218,7 +310,7 @@ jobs:
             0) case "$last" in "ACCEPTED (check)"*) [ "$manifests" = 1 ] && [ "$same" = yes ] && verdict=ACCEPTED ;; esac ;;
             1) case "$last" in REJECTED*) verdict=REJECTED ;; esac ;;
           esac
-          echo "VERDICT: $verdict (checker exit $CODE)"
+          echo "VERDICT: $verdict (checker exit $CODE)" | tee -a "$GITHUB_STEP_SUMMARY"
           [ "$verdict" = ACCEPTED ] && exit 0
           [ "$verdict" = REJECTED ] && exit 1
           exit 3

@@ -77,6 +77,23 @@ jobs:
         working-directory: lean
         run: lake exe cache get
 
+      - name: Swap space for the verifier
+        if: steps.one.outputs.run == 'yes'
+        run: |
+          set -eu
+          # The verifier needs more memory than a standard runner has for a proof that imports
+          # all of Mathlib; without swap the run hangs (see authoritative.yml, the same step).
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
+          d=$(df -m --output=avail,target / /mnt 2>/dev/null | awk 'NR>1' | sort -rn | awk 'NR==1{print $2}')
+          mb=$(( $(df -m --output=avail "$d" | awk 'NR==2{print $1}') - 6144 ))
+          [ "$mb" -le 12288 ] || mb=12288
+          if [ "$mb" -ge 1024 ]; then
+            f="${d%/}/pnp-swap"
+            sudo fallocate -l "${mb}M" "$f" && sudo chmod 600 "$f"
+            sudo mkswap -q "$f" && sudo swapon "$f"
+          fi
+          free -m
+
       - name: Run the checker
         if: steps.one.outputs.run == 'yes'
         run: |
