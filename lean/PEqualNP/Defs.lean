@@ -4,6 +4,7 @@ import PEqualNP.Defs.CircuitLowerBounds
 import PEqualNP.Defs.MetaComplexity
 import PEqualNP.Defs.MetaComplexityLocal
 import PEqualNP.Defs.MetaComplexitySparse
+import PEqualNP.Defs.MetaComplexityMinimal
 import PEqualNP.Defs.ProofComplexity
 import PEqualNP.Defs.ProofComplexityLin
 import PEqualNP.Defs.ProofComplexityLinK
@@ -27,6 +28,7 @@ import PEqualNP.Defs.Oracle
 import PEqualNP.Defs.Algebraic
 import PEqualNP.Defs.Expanders
 import PEqualNP.Defs.RiffleRank
+import PEqualNP.Defs.TimeAlt
 
 /-!
 # The definitions root
