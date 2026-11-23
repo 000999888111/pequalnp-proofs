@@ -7,7 +7,7 @@
 #   tools/pnp.sh beat <step>           keep the lease alive (every 30 minutes while you work)
 #   tools/pnp.sh check <step>          build your file
 #   tools/pnp.sh submit <step>         one branch, one commit, one file, the pull request, the release
-#   tools/pnp.sh release <step> <reason> [<sha256 of a search program> | <Lean name of the lemma you lacked>]
+#   tools/pnp.sh release <step> <reason> [<sha256 of a search program or of a re-checked file>]
 #                                      give a step back: hypothesis_too_weak | missing_lemma |
 #                                      statement_seems_false | does_not_elaborate | exhausted |
 #                                      out_of_time | other
@@ -88,8 +88,7 @@ submit)
   ;;
 release)
   have "$2"; q="lease=$(field "$2" lease.id)&reason=${3:?a reason}"; 
-  # The fourth word: with exhausted, the sha256 of the search program; with missing_lemma, the Lean name of the lemma you lacked.
-  if [ -n "${4:-}" ]; then case "$3" in missing_lemma) q="$q&needs=$4" ;; *) q="$q&program=$4" ;; esac; fi
+  [ -n "${4:-}" ] && q="$q&program=$4"   # with exhausted or rechecked: a sha256
   curl -sS -X POST "$DESK/release?$q"
   ;;
 *)
