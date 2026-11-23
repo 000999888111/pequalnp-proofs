@@ -130,11 +130,11 @@ const C = 'a'.repeat(40), B = 'b'.repeat(40), MF = 'lean/PEqualNP/Outside/L_meta
 const cmp = (over = {}) => ({ status: 'ahead', merge_base_commit: { sha: C }, ...over });
 const tr = (over = {}) => ({ truncated: false, tree: [{ path: MF, type: 'blob', mode: '100644', sha: B, size: 900, ...over }] });
 test('main: a plain file at a commit of the base branch', () => {
-  assert.deepEqual(checkMain(cmp(), tr(), MF, C), { file: MF, module: 'PEqualNP.Outside.L_meta_157', head: C, blob: B, author: 'main', size: 900 });
-  assert.equal(checkMain(cmp({ status: 'identical' }), tr(), MF, C).blob, B);
+  assert.deepEqual(checkMain(cmp(), tr(), MF, C, B), { file: MF, module: 'PEqualNP.Outside.L_meta_157', head: C, blob: B, author: 'main', size: 900 });
+  assert.equal(checkMain(cmp({ status: 'identical' }), tr(), MF, C, B).blob, B);
 });
 const mainRefused = (name, args, word) => test(`main refused: ${name}`, () => {
-  assert.throws(() => checkMain(...args), (e) => e.message.includes(word), 'not refused, or for another reason');
+  assert.throws(() => checkMain(...args, args[4] ?? B), (e) => e.message.includes(word), 'not refused, or for another reason');
 });
 mainRefused('a commit off the base branch', [cmp({ status: 'diverged' }), tr(), MF, C], 'not on the base branch');
 mainRefused('a commit ahead of the checked-out one', [cmp({ status: 'behind' }), tr(), MF, C], 'not on the base branch');
@@ -147,3 +147,5 @@ mainRefused('a link', [cmp(), tr({ mode: '120000' }), MF, C], 'plain file');
 mainRefused('an executable', [cmp(), tr({ mode: '100755' }), MF, C], 'plain file');
 mainRefused('a file too large', [cmp(), tr({ size: 600000 }), MF, C], 'between 1 and');
 mainRefused('a truncated tree', [cmp(), { ...tr(), truncated: true }, MF, C], 'too large');
+mainRefused('a file changed on the base branch since that commit', [cmp(), tr(), MF, C, 'c'.repeat(40)], 'no longer the file at that commit');
+mainRefused('a file removed from the base branch since that commit', [cmp(), tr(), MF, C, ''], 'no longer the file at that commit');

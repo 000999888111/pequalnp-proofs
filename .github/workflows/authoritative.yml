@@ -112,8 +112,11 @@ jobs:
             # an ancestor of it; the file is read from that commit's tree, as for a pull request.
             get "compare/$MAIN_COMMIT...$GITHUB_SHA" "$W/api/compare.json"
             get "git/trees/$MAIN_COMMIT?recursive=1" "$W/api/tree.json"
+            # The file as the checked-out base holds it now (its blob hash, empty if absent): it
+            # must be the file at the named commit, byte for byte, or the run is refused.
+            cur=$(git -C "$W/base" rev-parse -q --verify "HEAD:$MAIN_FILE" || true)
             node "$W/base/.github/scripts/outside-guard.mjs" main "$W/api/compare.json" "$W/api/tree.json" \
-              "$MAIN_FILE" "$MAIN_COMMIT" "$W/in"
+              "$MAIN_FILE" "$MAIN_COMMIT" "$cur" "$W/in"
             # Taken out of the base tree now, before anything is built: it is outside-written, so
             # it is compiled only in the locked step, from the bytes read at the named commit.
             f="$W/base/$(cat "$W/in/pr.file")"

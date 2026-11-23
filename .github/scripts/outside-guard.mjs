@@ -4,7 +4,7 @@
 // passed a strict pattern, so the shell never sees free text from a pull request.
 //
 //   node outside-guard.mjs pr <pr.json> <files.json> <tree.json> <repo> <default branch> <out dir>
-//   node outside-guard.mjs main <compare.json> <tree.json> <file path> <commit> <out dir>
+//   node outside-guard.mjs main <compare.json> <tree.json> <file path> <commit> <current blob> <out dir>
 //   node outside-guard.mjs gap <gaps.json> <gap id> <file path> <out dir>
 //   node outside-guard.mjs gap-of-file <gaps.json> <file path> <out dir>
 //   node outside-guard.mjs imports <lean file> <imports.json>
@@ -58,8 +58,10 @@ export function checkPr(pr, files, tree, repo, defaultBranch) {
 // A proof file ALREADY ON THE BASE BRANCH, judged again (a run without a pull request). Read from
 // the API's own answers: the comparison of the named commit with the commit this run checked
 // out (the named one must be on the base branch: the same commit or an ancestor), and the tree
-// of the named commit. The same file rules as for a pull request.
-export function checkMain(compare, tree, file, commit) {
+// of the named commit. The same file rules as for a pull request. And the file must still be on
+// the base branch as it was at that commit (`current`: its blob hash in the checked-out tree, ''
+// if it is not there), so a verdict about old bytes is never taken for one about the file on main.
+export function checkMain(compare, tree, file, commit, current) {
   if (!SHA_RE.test(commit ?? '')) refuse('the commit must be a 40 character hash');
   if (typeof file !== 'string' || !FILE_RE.test(file)) refuse('the file must be lean/PEqualNP/Outside/L_<gap>.lean');
   if (!['ahead', 'identical'].includes(compare?.status) || compare?.merge_base_commit?.sha !== commit) refuse('the commit is not on the base branch (not the checked-out commit or an ancestor of it)');
@@ -70,6 +72,7 @@ export function checkMain(compare, tree, file, commit) {
   if (e.type !== 'blob' || e.mode !== '100644') refuse('the file must be a plain file (not a link, not executable)');
   if (!SHA_RE.test(e.sha ?? '')) refuse('the tree names no content hash');
   if (!Number.isInteger(e.size) || e.size < 1 || e.size > MAX_BYTES) refuse(`the file must be between 1 and ${MAX_BYTES} bytes`);
+  if (current !== e.sha) refuse('the file on the base branch is no longer the file at that commit; name the current commit instead');
   return { file, module: moduleOf(file), head: commit, blob: e.sha, author: 'main', size: e.size };
 }
 
@@ -260,9 +263,9 @@ const main = () => {
   if (cmd === 'pr' && a.length === 6) {
     const r = checkPr(json(a[0]), json(a[1]), json(a[2]), a[3], a[4]);
     for (const [k, v] of Object.entries(r)) put(a[5], `pr.${k}`, `${v}\n`);
-  } else if (cmd === 'main' && a.length === 5) {
-    const r = checkMain(json(a[0]), json(a[1]), a[2], a[3]);
-    for (const [k, v] of Object.entries(r)) put(a[4], `pr.${k}`, `${v}\n`);
+  } else if (cmd === 'main' && a.length === 6) {
+    const r = checkMain(json(a[0]), json(a[1]), a[2], a[3], a[4]);
+    for (const [k, v] of Object.entries(r)) put(a[5], `pr.${k}`, `${v}\n`);
   } else if ((cmd === 'gap' && a.length === 4) || (cmd === 'gap-of-file' && a.length === 3)) {
     const byId = cmd === 'gap';
     const [gapsPath, file, out] = byId ? [a[0], a[2], a[3]] : a;
